@@ -571,12 +571,25 @@ async function startFirstPhase(interaction, trialData) {
     const roleMap = {};
     try {
         const guildRoles = await interaction.guild.roles.fetch();
+        const botMember = await interaction.guild.members.fetch(client.user.id);
+        const botHighestRole = botMember.roles.highest;
+        const targetPos = botHighestRole.position > 0 ? botHighestRole.position - 1 : 0;
+
         for (const [name, color] of Object.entries(roleColors)) {
             let r = guildRoles.find(r => r.name === name);
             if (!r) {
-                r = await interaction.guild.roles.create({ name: name, color: color, reason: 'Judgeman Trial Roles' });
+                r = await interaction.guild.roles.create({ 
+                    name: name, 
+                    color: color, 
+                    position: targetPos,
+                    reason: 'Judgeman Trial Roles' 
+                });
             } else {
                 await r.setColor(color).catch(()=>{});
+                // ボットのロールより下になるように位置を調整
+                if (r.position >= botHighestRole.position) {
+                    await r.setPosition(targetPos).catch(()=>{});
+                }
             }
             roleMap[name] = r;
         }
