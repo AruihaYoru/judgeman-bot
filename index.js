@@ -109,6 +109,10 @@ const stateManager = {
     resetSettings(guildId) {
         this.data.settings[guildId] = { timeoutEnabled: true, batsuEnabled: false, minTO: 1, maxTO: 5 };
         this.save();
+    },
+    clearNick(userId) {
+        delete this.data.originalNicks[userId];
+        this.save();
     }
 };
 stateManager.load();
@@ -358,7 +362,9 @@ client.on('interactionCreate', async interaction => {
             
             if (action === 'disagree') {
                 const isActor = [trial.judge, trial.prosecutor, trial.defencer, trial.defendant].includes(interaction.user.id);
-                if (isActor) {
+                // 被告人が反対した場合は即時却下せず、3票分としてカウントする（後続の処理で対応）
+                // 被告人以外の役者が反対した場合は、従来どおり即時却下する
+                if (isActor && interaction.user.id !== trial.defendant) {
                     await interaction.reply(i18next.t('trial.vote_rejected_by_actor', { lng: trial.lang }));
                     stateManager.deleteTrial(interaction.channelId);
                     return;
@@ -376,7 +382,11 @@ client.on('interactionCreate', async interaction => {
             }
             stateManager.setTrial(interaction.channelId, trial);
             const actionT = i18next.t(action === 'agree' ? 'trial.btn_agree' : 'trial.btn_disagree', { lng });
-            await interaction.reply({ content: i18next.t('trial.vote_recorded', { lng, action: actionT, agree: trial.votesAgree.length, disagree: trial.votesDisagree.length }), ephemeral: true });
+            
+            const agreeCount = trial.votesAgree.length;
+            const disagreeCount = trial.votesDisagree.reduce((acc, id) => acc + (id === trial.defendant ? 3 : 1), 0);
+            
+            await interaction.reply({ content: i18next.t('trial.vote_recorded', { lng, action: actionT, agree: agreeCount, disagree: disagreeCount }), ephemeral: true });
         
         } else if (type === 'jury') {
             const isActor = [trial.prosecutor, trial.defencer, trial.defendant].includes(interaction.user.id);
@@ -527,7 +537,10 @@ async function handleJudgementStart(interaction, lng) {
     setTimeout(async () => {
         const currentTrial = stateManager.getTrial(interaction.channelId);
         if (currentTrial && currentTrial.id === trialId && currentTrial.phase === 0) {
-            if (currentTrial.votesAgree.length > currentTrial.votesDisagree.length) {
+            const agreeCount = currentTrial.votesAgree.length;
+            const disagreeCount = currentTrial.votesDisagree.reduce((acc, id) => acc + (id === currentTrial.defendant ? 3 : 1), 0);
+
+            if (agreeCount > disagreeCount) {
                 await startFirstPhase(interaction, currentTrial);
             } else {
                 await interaction.channel.send(i18next.t('trial.rejected_by_vote', { lng: trialLang }));
@@ -549,13 +562,22 @@ async function startFirstPhase(interaction, trialData) {
 
     await interaction.channel.send({ content: msgContent, components: [btnRow] });
 
-    const roleNames = ['裁判官', '検事', '弁護人', '被告'];
+    const roleColors = {
+        '裁判官': 0xF1C40F, // Gold
+        '検事': 0xE74C3C,   // Red
+        '弁護人': 0x3498DB, // Blue
+        '被告': 0x95A5A6    // Gray
+    };
     const roleMap = {};
     try {
         const guildRoles = await interaction.guild.roles.fetch();
-        for (const name of roleNames) {
+        for (const [name, color] of Object.entries(roleColors)) {
             let r = guildRoles.find(r => r.name === name);
-            if (!r) r = await interaction.guild.roles.create({ name: name, color: 0x555555 });
+            if (!r) {
+                r = await interaction.guild.roles.create({ name: name, color: color, reason: 'Judgeman Trial Roles' });
+            } else {
+                await r.setColor(color).catch(()=>{});
+            }
             roleMap[name] = r;
         }
 
@@ -565,11 +587,13 @@ async function startFirstPhase(interaction, trialData) {
                 const actualRoles = rolesToAdd.map(n => roleMap[n]);
                 await member.roles.add(actualRoles);
 
-                if (!stateManager.getNick(userId)) {
-                    stateManager.saveNick(userId, member.nickname || '');
+                // まだニックネームが保存されていない場合のみ保存（二重保存防止）
+                if (stateManager.getNick(userId) === undefined) {
+                    stateManager.saveNick(userId, member.nickname === null ? '' : member.nickname);
                 }
                 
-                await member.setNickname(`${member.user.username}(${nickSuffix})`).catch(()=>{});
+                const currentName = member.displayName;
+                await member.setNickname(`【${nickSuffix}】${currentName}`).catch(()=>{});
             } catch (e) {
                 console.log(`Role assigned error (${userId}):`, e.message);
             }
@@ -579,7 +603,7 @@ async function startFirstPhase(interaction, trialData) {
         await assignRoleAndNick(trialData.prosecutor, ['検事'], '検事');
 
         if (trialData.defendant === trialData.defencer) {
-            await assignRoleAndNick(trialData.defendant, ['被告', '弁護人'], '兼弁護人');
+            await assignRoleAndNick(trialData.defendant, ['被告', '弁護人'], '被告兼弁護人');
         } else {
             await assignRoleAndNick(trialData.defendant, ['被告'], '被告');
             await assignRoleAndNick(trialData.defencer, ['弁護人'], '弁護人');
@@ -691,6 +715,7 @@ async function finalizePunishment(channelId, guild, trial, resultType) {
                 const originalNick = stateManager.getNick(userId);
                 if (originalNick !== undefined) { 
                     await member.setNickname(originalNick === '' ? null : originalNick).catch(()=>{});
+                    stateManager.clearNick(userId); // 復元後にクリア
                 }
             } catch(e){}
         };
@@ -723,6 +748,9 @@ async function finalizePunishment(channelId, guild, trial, resultType) {
         mappingText += `${tag} : ${id}\n`;
     }
 
+    const agreeCountLog = trial.votesAgree.length;
+    const disagreeCountLog = trial.votesDisagree.reduce((acc, id) => acc + (id === trial.defendant ? 3 : 1), 0);
+
     const logText = `
 === 裁判ログ / Trial Log (ID: ${trial.id}) ===
 終了日時: ${new Date().toLocaleString('ja-JP')}
@@ -735,8 +763,8 @@ async function finalizePunishment(channelId, guild, trial, resultType) {
 最終判決: ${finalStr}
 
 [詳細な投票記録 / Detailed Voting Records]
-妥当性同意 (Validity Agree): ${trial.votesAgree.length}票 (${formatVoters(trial.votesAgree)})
-妥当性反対 (Validity Disagree): ${trial.votesDisagree.length}票 (${formatVoters(trial.votesDisagree)})
+妥当性同意 (Validity Agree): ${agreeCountLog}票 (${formatVoters(trial.votesAgree)})
+妥当性反対 (Validity Disagree): ${disagreeCountLog}票 (${formatVoters(trial.votesDisagree)})
 陪審員有罪 (Jury Guilty): ${trial.juryGuilty.length}票 (${formatVoters(trial.juryGuilty)})
 陪審員無罪 (Jury Innocent): ${trial.juryInnocent.length}票 (${formatVoters(trial.juryInnocent)})
 
