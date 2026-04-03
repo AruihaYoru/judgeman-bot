@@ -7,19 +7,33 @@ dotenv.config();
 
 const isTestMode = process.argv.includes('--test');
 
-const jaLocale = fs.existsSync('./locales/ja.json') ? JSON.parse(fs.readFileSync('./locales/ja.json', 'utf8')) : {};
-const enLocale = fs.existsSync('./locales/en.json') ? JSON.parse(fs.readFileSync('./locales/en.json', 'utf8')) : {};
+const resources = {};
+if (fs.existsSync('./locales')) {
+    const localeFiles = fs.readdirSync('./locales').filter(f => f.endsWith('.json'));
+    localeFiles.forEach(f => {
+        const lang = f.replace('.json', '');
+        resources[lang] = { translation: JSON.parse(fs.readFileSync(`./locales/${f}`, 'utf8')) };
+    });
+}
+
 i18next.init({
     lng: 'ja',
     fallbackLng: 'ja',
-    resources: {
-        ja: { translation: jaLocale },
-        en: { translation: enLocale }
-    }
+    resources: resources
 });
 
-const getInteractionLang = (interaction) => interaction.locale && interaction.locale.startsWith('ja') ? 'ja' : 'en';
-const getGuildLang = (interaction) => interaction.guildLocale && interaction.guildLocale.startsWith('ja') ? 'ja' : 'en';
+const getInteractionLang = (interaction) => {
+    const locale = interaction.locale || 'ja';
+    if (locale.startsWith('ja')) return 'ja';
+    if (locale.startsWith('zh')) return 'zh';
+    return 'en';
+};
+const getGuildLang = (interaction) => {
+    const locale = interaction.guildLocale || 'ja';
+    if (locale.startsWith('ja')) return 'ja';
+    if (locale.startsWith('zh')) return 'zh';
+    return 'en';
+};
 
 const client = new Client({
     intents: [
@@ -98,7 +112,7 @@ const stateManager = {
     },
     getSettings(guildId) {
         if (!this.data.settings[guildId]) {
-            this.data.settings[guildId] = { timeoutEnabled: true, batsuEnabled: false, minTO: 1, maxTO: 5 };
+            this.data.settings[guildId] = { punishmentMode: 'timeout', minTO: 1, maxTO: 5 };
         }
         return this.data.settings[guildId];
     },
@@ -107,7 +121,7 @@ const stateManager = {
         this.save();
     },
     resetSettings(guildId) {
-        this.data.settings[guildId] = { timeoutEnabled: true, batsuEnabled: false, minTO: 1, maxTO: 5 };
+        this.data.settings[guildId] = { punishmentMode: 'timeout', minTO: 1, maxTO: 5 };
         this.save();
     },
     clearNick(userId) {
@@ -117,69 +131,72 @@ const stateManager = {
 };
 stateManager.load();
 
-const cmdJudgmentBase = (name, desc) => new SlashCommandBuilder()
-    .setName(name).setDescription(desc)
-    .addUserOption(option => option.setName('prosecutor').setDescription('検事 - Prosecutor').setRequired(true))
-    .addUserOption(option => option.setName('defendant').setDescription('被告 - Defendant').setRequired(true))
-    .addUserOption(option => option.setName('judge').setDescription('裁判官 - Judge').setRequired(true))
-    .addStringOption(option => option.setName('charge').setDescription('罪状 - Charge').setRequired(true))
-    .addUserOption(option => option.setName('defencer').setDescription('弁護士 - Defencer (Blank to self-defend)'));
-
-const commands = [
-    cmdJudgmentBase('judgement', '領域展開「誅伏賜死」を開始します。'),
-    cmdJudgmentBase('誅伏賜死', '領域展開「誅伏賜死」を開始します(judgementと同一)'),
-    cmdJudgmentBase('開廷', '領域展開「誅伏賜死」を開始します(judgementと同一)'),
-    cmdJudgmentBase('deadly-sentencing', '領域展開「誅伏賜死」を開始します(judgementと同一)'),
-    new SlashCommandBuilder()
+const getSlashCommands = (guildId) => {
+    const settings = stateManager.getSettings(guildId);
+    const cmdGu = new SlashCommandBuilder()
         .setName('gu')
-        .setDescription('【裁判官専用】被告に判決（有罪）を下します。')
-        .addNumberOption(option => option.setName('timeout').setDescription('タイムアウト時間（分）を指定します。'))
-        .addStringOption(option => option.setName('batsu').setDescription('罰ゲームの内容（任意）を入力します。')),
-    new SlashCommandBuilder()
-        .setName('settingjudge')
-        .setDescription('サーバーの判決ルール（TO、罰ゲームの有効/無効）を変更します。')
-        .addBooleanOption(opt => opt.setName('enable_to').setDescription('タイムアウト刑罰を有効にするか（True: 有効, False: 無効）').setRequired(true))
-        .addBooleanOption(opt => opt.setName('enable_batsu').setDescription('罰ゲーム指定を有効にするか（True: 有効, False: 無効）').setRequired(true)),
-    new SlashCommandBuilder()
-        .setName('resetsetting')
-        .setDescription('サーバーの設定を初期値にリセットします。'),
-    new SlashCommandBuilder()
-        .setName('in')
-        .setDescription('【裁判官専用】無罪を宣告し、被告に罪を課しません。'),
-    new SlashCommandBuilder()
-        .setName('re')
-        .setDescription('【弁護人/被告限定】猶予期間内に使用。ペナルティを代償に再審を行います。'),
-    new SlashCommandBuilder()
-        .setName('info')
-        .setDescription('現在進行中の裁判についての情報を表示します。'),
-    new SlashCommandBuilder()
-        .setName('forceclose')
-        .setDescription('【開発者専用】強制的に現在の裁判を終了しクリーンアップします。'),
-    new SlashCommandBuilder()
-        .setName('action')
-        .setDescription('法廷内での行動（異議、休憩など）を宣言します。')
-        .addStringOption(opt => opt.setName('type').setDescription('行動内容').setRequired(true)),
-    new SlashCommandBuilder()
-        .setName('dm')
-        .setDescription('【役者専用】法廷内の特定の相手に通信を送信します。')
-        .addUserOption(opt => opt.setName('target').setDescription('送信相手の役者').setRequired(true))
-        .addStringOption(opt => opt.setName('message').setDescription('メッセージ内容').setRequired(true)),
-];
+        .setDescription('【裁判官専用】被告に判決（有罪）を下します。');
+    
+    if (settings.punishmentMode === 'timeout') {
+        cmdGu.addNumberOption(option => option.setName('timeout').setDescription('タイムアウト時間（分）を指定します。 (1-5)').setRequired(true));
+    } else if (settings.punishmentMode === 'batsu') {
+        cmdGu.addStringOption(option => option.setName('batsu').setDescription('罰ゲームの内容を入力します。').setRequired(true));
+    }
+
+    return [
+        cmdJudgmentBase('judgement', '領域展開「誅伏賜死」を開始します。'),
+        cmdJudgmentBase('誅伏賜死', '領域展開「誅伏賜死」を開始します(judgementと同一)'),
+        cmdJudgmentBase('開廷', '領域展開「誅伏賜死」を開始します(judgementと同一)'),
+        cmdJudgmentBase('deadly-sentencing', '領域展開「誅伏賜死」を開始します(judgementと同一)'),
+        cmdGu,
+        new SlashCommandBuilder()
+            .setName('settingjudge')
+            .setDescription('サーバーの判決ルール（TO、罰ゲームの有効/無効）を変更します。')
+            .addStringOption(opt => opt.setName('mode')
+                .setDescription('処罰モードを選択してください。')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'タイムアウト (Timeout)', value: 'timeout' },
+                    { name: '罰ゲーム (Batsu)', value: 'batsu' },
+                    { name: '罰なし (None)', value: 'none' }
+                )
+            ),
+        new SlashCommandBuilder().setName('resetsetting').setDescription('サーバーの設定を初期値にリセットします。'),
+        new SlashCommandBuilder().setName('in').setDescription('【裁判官専用】無罪を宣告し、被告に罪を課しません。'),
+        new SlashCommandBuilder().setName('re').setDescription('【弁護人/被告限定】猶予期間内に使用。ペナルティを代償に再審を行います。'),
+        new SlashCommandBuilder().setName('info').setDescription('現在進行中の裁判についての情報を表示します。'),
+        new SlashCommandBuilder().setName('forceclose').setDescription('【開発者専用】強制的に現在の裁判を終了しクリーンアップします。'),
+        new SlashCommandBuilder().setName('action').setDescription('法廷内での行動を宣言します。')
+            .addStringOption(opt => opt.setName('type').setDescription('行動内容').setRequired(true)),
+        new SlashCommandBuilder().setName('dm').setDescription('【当事者限定】法廷内の特定の相手に通信を送信します。')
+            .addUserOption(opt => opt.setName('target').setDescription('送信相手となる当事者').setRequired(true))
+            .addStringOption(opt => opt.setName('message').setDescription('メッセージ内容').setRequired(true)),
+    ];
+};
+
+async function deployCommands(guildIdToDeploy = null) {
+    const rest = new REST({ version: '10' }).setToken(token);
+    try {
+        const targetId = guildIdToDeploy || guildId;
+        if (targetId) {
+            const cmds = getSlashCommands(targetId);
+            await rest.put(Routes.applicationGuildCommands(clientId, targetId), { body: cmds });
+            console.log(`[SYS] Registered commands for ${targetId}`);
+        } else {
+            // Global (Fallback/Normal)
+            const cmds = getSlashCommands(null);
+            await rest.put(Routes.applicationCommands(clientId), { body: cmds });
+            console.log('[SYS] Registered global commands');
+        }
+    } catch (error) {
+        console.error(error);
+    }
+}
 
 client.once('clientReady', async () => {
     console.log(`[SYS] Judgeman logged in (${client.user.tag})`);
     if (isTestMode) console.log(`[SYS] Test mode is active`);
-    const rest = new REST({ version: '10' }).setToken(token);
-    try {
-        if (guildId) {
-            await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-        } else {
-            await rest.put(Routes.applicationCommands(clientId), { body: commands });
-        }
-        console.log('[SYS] Registered slash commands');
-    } catch (error) {
-        console.error(error);
-    }
+    await deployCommands();
 });
 
 client.on('messageCreate', async message => {
@@ -280,7 +297,7 @@ client.on('interactionCreate', async interaction => {
                 const timeoutMinutes = interaction.options.getNumber('timeout') ?? 0;
                 const batsu = interaction.options.getString('batsu');
 
-                if (settings.timeoutEnabled && timeoutMinutes > 0) {
+                if (settings.punishmentMode === 'timeout' && timeoutMinutes > 0) {
                     if (timeoutMinutes < settings.minTO || timeoutMinutes > settings.maxTO) {
                         return interaction.reply({ content: `判決エラー：タイムアウトは ${settings.minTO}分 から ${settings.maxTO}分 の範囲で指定してください。`, ephemeral: true });
                     }
@@ -288,13 +305,17 @@ client.on('interactionCreate', async interaction => {
 
                 trial.pendingPunishment = 'to';
                 trial.baseMinutes = timeoutMinutes;
-                trial.pendingBatsu = settings.batsuEnabled ? batsu : null;
+                trial.pendingBatsu = (settings.punishmentMode === 'batsu') ? batsu : null;
                 trial.reAllowed = true;
                 stateManager.setTrial(interaction.channelId, trial);
 
-                let sentenceMsg = i18next.t('trial.sentence_timeout', { lng: trial.lang, defendant: trial.defendant, minutes: settings.timeoutEnabled ? timeoutMinutes : 0 });
-                if (settings.batsuEnabled && batsu) {
-                    sentenceMsg += `\n**役職外刑罰（罰ゲーム）：**\n「 ${batsu} 」`;
+                let sentenceMsg = '';
+                if (settings.punishmentMode === 'timeout') {
+                    sentenceMsg = i18next.t('trial.sentence_timeout', { lng: trial.lang, defendant: trial.defendant, minutes: timeoutMinutes });
+                } else if (settings.punishmentMode === 'batsu') {
+                    sentenceMsg = i18next.t('trial.batsu_applied', { lng: trial.lang, defendant: trial.defendant, batsu: batsu });
+                } else {
+                    sentenceMsg = i18next.t('trial.batsu_none_applied', { lng: trial.lang, defendant: trial.defendant });
                 }
 
                 await interaction.reply(sentenceMsg);
@@ -331,20 +352,18 @@ client.on('interactionCreate', async interaction => {
             startTrialPhase(interaction.channelId);
 
             const settings = stateManager.getSettings(interaction.guildId);
-            const toStr = settings.timeoutEnabled ? `${settings.minTO}m - ${settings.maxTO}m` : 'Disabled';
-            const batsuStr = settings.batsuEnabled ? 'Enabled' : 'Disabled';
-            const statusStr = `[TO: ${toStr}, Batsu: ${batsuStr}]`;
+            const statusStr = `[Mode: ${settings.punishmentMode}]`;
             
             await interaction.reply(i18next.t('trial.status', { lng, phase: trial.phase, defendant: trial.defendant, defencer: trial.defencer, prosecutor: trial.prosecutor, judge: trial.judge, charge: trial.charge, multiplier: trial.penaltyMultiplier, statusStr }));
         } else if (cmd === 'settingjudge') {
-            const enableTO = interaction.options.getBoolean('enable_to');
-            const enableBatsu = interaction.options.getBoolean('enable_batsu');
-            stateManager.updateSettings(interaction.guildId, { timeoutEnabled: enableTO, batsuEnabled: enableBatsu });
-            const s = stateManager.getSettings(interaction.guildId);
-            await interaction.reply({ content: `設定を更新しました。\nタイムアウト刑罰: ${s.timeoutEnabled ? '有効' : '無効'}\n罰ゲーム指定: ${s.batsuEnabled ? '有効' : '無効'}`, ephemeral: true });
+            const mode = interaction.options.getString('mode');
+            stateManager.updateSettings(interaction.guildId, { punishmentMode: mode });
+            await interaction.reply({ content: `設定を更新しました。モード: ${mode}`, ephemeral: true });
+            await deployCommands(interaction.guildId);
         } else if (cmd === 'resetsetting') {
             stateManager.resetSettings(interaction.guildId);
             await interaction.reply({ content: `サーバー設定を初期値にリセットしました。`, ephemeral: true });
+            await deployCommands(interaction.guildId);
         }
     }
     
@@ -363,7 +382,7 @@ client.on('interactionCreate', async interaction => {
             if (action === 'disagree') {
                 const isActor = [trial.judge, trial.prosecutor, trial.defencer, trial.defendant].includes(interaction.user.id);
                 // 被告人が反対した場合は即時却下せず、3票分としてカウントする（後続の処理で対応）
-                // 被告人以外の役者が反対した場合は、従来どおり即時却下する
+                // 被告人以外の当事者が反対した場合は、従来どおり即時却下する
                 if (isActor && interaction.user.id !== trial.defendant) {
                     await interaction.reply(i18next.t('trial.vote_rejected_by_actor', { lng: trial.lang }));
                     stateManager.deleteTrial(interaction.channelId);
@@ -689,21 +708,25 @@ async function finalizePunishment(channelId, guild, trial, resultType) {
         const finalMinutes = trial.baseMinutes * trial.penaltyMultiplier;
         const settings = stateManager.getSettings(guild.id);
         
-        finalStr = settings.timeoutEnabled ? `タイムアウト (Timeout) ${finalMinutes}分 (mins)` : `有罪（TO無効・刑罰なし）`;
-        if (trial.pendingBatsu) finalStr += ` [罰ゲーム: ${trial.pendingBatsu}]`;
+        if (settings.punishmentMode === 'timeout') {
+            finalStr = `タイムアウト (Timeout) ${finalMinutes}分 (mins)`;
+        } else if (settings.punishmentMode === 'batsu') {
+            finalStr = `有罪（罰ゲーム実行） [内容: ${trial.pendingBatsu}]`;
+        } else {
+            finalStr = `有罪（刑罰なし）`;
+        }
 
         try {
             const targetMember = await guild.members.fetch(trial.defendant);
-            if (settings.timeoutEnabled && finalMinutes > 0) {
+            if (settings.punishmentMode === 'timeout' && finalMinutes > 0) {
                 await targetMember.timeout(finalMinutes * 60 * 1000, `Judicial verdict: ${trial.charge}`);
                 let msg = i18next.t('trial.timeout_applied', { lng, defendant: trial.defendant, minutes: finalMinutes });
-                if (trial.pendingBatsu) msg += `\n**指定された罰ゲーム：**\n「 ${trial.pendingBatsu} 」`;
+                if (channel) await channel.send(msg);
+            } else if (settings.punishmentMode === 'batsu') {
+                let msg = i18next.t('trial.batsu_applied', { lng, defendant: trial.defendant, batsu: trial.pendingBatsu });
                 if (channel) await channel.send(msg);
             } else {
-                let msg = i18next.t('trial.sentence_innocent', { lng: trial.lang, defendant: trial.defendant }).replace(i18next.t('trial.btn_innocent', {lng}), '有罪 (Guilty)'); // Slightly hacky but informative
-                if (trial.pendingBatsu) msg = `被告 <@${trial.defendant}> へ **有罪** を宣告する。実際のタイムアウトは執行されないが、以下の罰ゲームを課す。\n\n**罰ゲーム：**\n「 ${trial.pendingBatsu} 」`;
-                else msg = `被告 <@${trial.defendant}> へ **有罪** を宣告する。実際のタイムアウトは執行されない。`;
-                
+                let msg = i18next.t('trial.batsu_none_applied', { lng, defendant: trial.defendant });
                 if (channel) await channel.send(msg);
             }
         } catch (e) {
